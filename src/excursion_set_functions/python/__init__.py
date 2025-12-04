@@ -1,3 +1,3 @@
-from . import analytical, numerical, integration, spline
+from . import analytical, numerical, integration, spline, photo_z
 
-__all__ = ["numerical", "integration", "analytical", "spline"]
+__all__ = ["numerical", "integration", "analytical", "spline", "photo_z"]
