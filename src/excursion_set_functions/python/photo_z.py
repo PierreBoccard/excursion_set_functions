@@ -18,7 +18,6 @@ Key equations implemented:
 import numpy as np
 from numba import jit
 from scipy import special
-from .spline import cubic_spline_coeffs, explicit_from_implicit_coeffs, get_values_sorted
 
 
 # =============================================================================
@@ -411,20 +410,26 @@ def Xi_eff_photo_z(Pk, k, R, sigma_chi):
     Pk = np.asarray(Pk, dtype=float)
     
     len_R = len(R)
-    Xi = np.zeros((len_R, len_R))
+    len_k = len(k)
     
     # Compute G(k*sigma_chi) once
     G = G_photo_z(k * sigma_chi)
     
-    # Pre-compute all tophat windows
-    W_all = np.zeros((len_R, len(k)))
+    # Pre-compute all tophat windows using broadcasting
+    # W_all[i, j] = W_T(k[j] * R[i])
+    W_all = np.zeros((len_R, len_k))
     for i, r in enumerate(R):
         W_all[i] = tophat_window(k * r)
     
-    # Compute cross-covariance matrix
+    # Compute integrand base: k^2 * P(k) * G
+    integrand_base = k ** 2 * Pk * G  # shape: (len_k,)
+    
+    # Compute cross-covariance matrix using vectorized outer products
+    # Xi[i,j] = trapz(integrand_base * W_all[i] * W_all[j], k) / (2*pi^2)
+    Xi = np.zeros((len_R, len_R))
     for i in range(len_R):
         for j in range(i + 1):
-            integrand = k ** 2 * Pk * W_all[i] * W_all[j] * G
+            integrand = integrand_base * W_all[i] * W_all[j]
             Xi[i, j] = np.trapz(integrand, k) / (2.0 * np.pi ** 2)
             Xi[j, i] = Xi[i, j]  # Symmetric
     
@@ -777,12 +782,13 @@ def compute_photo_z_vsf(Pk, k, R, sigma_chi, barrier_params=None,
         dSeff_dR = dS_dR.copy()
     
     # Spectroscopic barrier: B(S) = alpha * (1 + beta / S^gamma)
-    B_spectro = alpha * (1.0 + beta / S ** gamma) if gamma > 0 else alpha * np.ones_like(S)
-    
-    # Derivative dB/dS
-    if gamma > 0:
+    # Handle cases: gamma=0 gives constant barrier, gamma>0 with beta!=0 adds S-dependence
+    if gamma > 0 and beta != 0:
+        B_spectro = alpha * (1.0 + beta / S ** gamma)
         dB_dS = -alpha * beta * gamma * S ** (-gamma - 1)
     else:
+        # Constant barrier: B = alpha (when gamma=0 or beta=0)
+        B_spectro = alpha * np.ones_like(S)
         dB_dS = np.zeros_like(S)
     
     # Photo-z barrier
