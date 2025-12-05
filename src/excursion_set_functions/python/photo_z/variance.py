@@ -132,8 +132,9 @@ def d2Seff_dR2_photo_z(Pk, k, R, sigma_chi):
         W = tophat_window(x)
         dW = tophat_window_derivative(x)
         d2W = tophat_window_second_derivative(x)
-        # d^2(W^2)/dR^2 = 2*(dW/dR)^2 + 2*W*d^2W/dR^2
-        # = 2*k^2*dW^2 + 2*W*k^2*d2W
+        # d^2S/dR^2 = d/dR of dS/dR
+        # Using: d(W^2)/dR = 2*W*dW/dR = 2*k*W*dW'
+        # d^2(W^2)/dR^2 = 2*(k*dW')^2 + 2*W*(k^2*dW'')
         integrand = k ** 2 * Pk * ((k * dW) ** 2 + W * k ** 2 * d2W) * G
         d2Seff[i] = np.trapz(integrand, k) / (np.pi ** 2)
     
