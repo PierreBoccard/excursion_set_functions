@@ -1,110 +1,251 @@
 """
-Multiplicity functions with photo-z (eqs. 95-98).
+Void size function (VSF) computation with photo-z effects.
 
-This module implements the multiplicity functions that account for
-photometric redshift uncertainties.
+Main module implementing the complete VSF calculation including:
+- Power spectrum setup
+- Variance and W parameter computation  
+- Barrier evaluation
+- Multiplicity function computation
+- Eulerian transformation
 """
 
 import numpy as np
-from scipy import special
+from scipy.interpolate import interp1d
+from astropy.cosmology import FlatwCDM
+import camb
+
+from .cosmology import compute_sigma_chi
+from .variance import compute_W_reference_method
 
 
-def f_photo_z_MB(Seff, B_ph, dB_ph_dSeff, D_tot=0.0, N_taylor=5):
+def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin, 
+                                       omega_m, w, bias, R_euler_desired, 
+                                       redshift_min, redshift_max, sigma_z,
+                                       f_S_MB_approx_func,
+                                       delta_NL_func=None,
+                                       power_spectrum_cache=None,
+                                       verbose=True):
     """
-    Compute photo-z multiplicity using MB (Musso-Sheth) form.
+    Compute void size function (VSF) with photo-z effects. 
     
-    From eqs. (95-96):
-    f_ph(S_eff) ≈ |T_ph(S_eff)| / sqrt(2*pi*S_eff^3) * exp(-B_ph^2 / (2*(1+D_tot)*S_eff))
+    Implements the complete excursion set formalism with photo-z damping:
+    1. Sets up cosmology and computes power spectrum
+    2. Computes variance S(R), dS/dR, and W parameter with photo-z effects
+    3. Evaluates moving barrier B(S) and derivative dB/dS
+    4. Computes multiplicity function f(S) using moving barrier approximation
+    5. Transforms from Lagrangian to Eulerian space
     
-    T_ph(S_eff) = sum_{n=0}^{N} (-S_eff)^n / n! * d^n B_ph / dS_eff^n
-    
-    Parameters
-    ----------
-    Seff : float or array
-        Effective variance Seff(R)
-    B_ph : float or array
-        Photo-z barrier Bph(R)
-    dB_ph_dSeff : float or array
-        First derivative dBph/dSeff
-    D_tot : float, optional
-        Total diffusion coefficient D_tot = D_B + D_ph, default 0.0
-    N_taylor : int, optional
-        Number of Taylor terms in T_ph, default 5
+    Parameters:  
+    -----------
+    a1, a2, b1, b2, gamma :   float
+        Barrier function parameters
+        Barrier:  B(S) = α(1 + (β/√S)^γ)
+        where α = a1*|δ_v| + a2, β = b1*|δ_v| + b2
+    delta_v_lin : float
+        Linear void density contrast (typically negative, e.g., -0.8)
+    omega_m, w : float
+        Cosmological parameters (matter density, dark energy EOS)
+    bias : float
+        Void bias parameter for Eulerian transformation
+    R_euler_desired : array
+        Desired Eulerian radii (NOT USED - function creates its own grid)
+    redshift_min, redshift_max : float
+        Redshift range for power spectrum averaging
+    sigma_z : float
+        Photo-z scatter coefficient (dimensionless, σ_z/(1+z))
+        Set to 0 for isotropic (no photo-z) case
+    f_S_MB_approx_func : callable
+        Moving barrier multiplicity function from analytical module
+        Signature: f_S_MB_approx(s, W, B, dB_dS) -> array
+    delta_NL_func : callable, optional
+        Nonlinear delta transformation function (from utilities)
+        If None, uses linear approximation
+    power_spectrum_cache : dict, optional
+        Cache for power spectra (passed by reference, modified in place)
+    verbose : bool, optional
+        Print diagnostic messages (default True)
         
-    Returns
-    -------
-    f_ph : float or array
-        Photo-z multiplicity
-    """
-    Seff = np.atleast_1d(np.asarray(Seff, dtype=float))
-    B_ph = np.atleast_1d(np.asarray(B_ph, dtype=float))
-    dB_ph_dSeff = np.atleast_1d(np.asarray(dB_ph_dSeff, dtype=float))
-    
-    # Compute T_ph (simplified: using first few terms)
-    # For a linear barrier B = delta_c (constant), only n=0 term is non-zero: T = B
-    # For general case, we use the first-order approximation
-    T_ph = B_ph - Seff * dB_ph_dSeff
-    
-    # Exponential suppression
-    exp_term = np.exp(-B_ph ** 2 / (2.0 * (1.0 + D_tot) * Seff))
-    
-    # Prefactor
-    prefactor = np.abs(T_ph) / np.sqrt(2.0 * np.pi * Seff ** 3)
-    
-    f_ph = prefactor * exp_term
-    
-    if len(f_ph) == 1:
-        return float(f_ph[0])
-    return f_ph
-
-
-def f_photo_z_upcrossing(Seff, B_ph, dB_ph_dSeff, Gamma_eff_dd):
-    """
-    Compute photo-z multiplicity using upcrossing form.
-    
-    From eq. (98):
-    f_ph(S_eff) ≈ exp(-B_ph^2/(2*S_eff)) / sqrt(2*pi*S_eff) *
-        [sqrt(Gamma_eff/(2*pi*S_eff)) * exp(-S_eff/(2*Gamma_eff)*(B_ph/(2*S_eff) - dB_ph/dS_eff)^2)
-         + 1/2 * (B_ph/(2*S_eff) - dB_ph/dS_eff) * (erf(...) + 1)]
-    
-    Parameters
-    ----------
-    Seff : float or array
-        Effective variance Seff(R)
-    B_ph : float or array
-        Photo-z barrier Bph(R)
-    dB_ph_dSeff : float or array
-        Derivative dBph/dSeff
-    Gamma_eff_dd : float or array
-        Value-slope covariance Gamma_eff from photo-z covariance
+    Returns:
+    --------
+    R_E : array
+        Eulerian radii [Mpc/h]
+    VSF_E : array
+        Void size function dn/dR [h³/Mpc³]
+    s :  array
+        Variance array (for diagnostics)
         
-    Returns
-    -------
-    f_ph : float or array
-        Photo-z multiplicity (upcrossing form)
+    Notes:
+    ------
+    - Uses R grid from 100 → 1 Mpc/h (Lagrangian) to match reference
+    - Moving barrier approximation requires LDD = s*W - 0.25 > 0
+    - Photo-z damping suppresses small-scale structure
+    
+    Examples:
+    ---------
+    >>> from analytical import f_S_MB_approx
+    >>> R_E, VSF_E, s = compute_vsf_eulerian_with_photoz(
+    ...     a1=0.517, a2=-0.089, b1=0.098, b2=0.103, gamma=1,
+    ...     delta_v_lin=-0.8, omega_m=0.3, w=-1. 0, bias=2,
+    ...     R_euler_desired=None, redshift_min=1. 0, redshift_max=1.2,
+    ...     sigma_z=0.01, f_S_MB_approx_func=f_S_MB_approx
+    ... )
     """
-    Seff = np.atleast_1d(np.asarray(Seff, dtype=float))
-    B_ph = np.atleast_1d(np.asarray(B_ph, dtype=float))
-    dB_ph_dSeff = np.atleast_1d(np.asarray(dB_ph_dSeff, dtype=float))
-    Gamma_eff_dd = np.atleast_1d(np.asarray(Gamma_eff_dd, dtype=float))
     
-    # beta_star = B_ph/(2*S_eff) - dB_ph/dS_eff
-    beta_star = B_ph / (2.0 * Seff) - dB_ph_dSeff
+    if power_spectrum_cache is None: 
+        power_spectrum_cache = {}
     
-    # Argument for the Gaussian and erf
-    arg = np.sqrt(Seff / (2.0 * Gamma_eff_dd)) * beta_star
-    
-    # Term 1: Gaussian part
-    term1 = np.sqrt(Gamma_eff_dd / (2.0 * np.pi * Seff)) * np.exp(-Seff / (2.0 * Gamma_eff_dd) * beta_star ** 2)
-    
-    # Term 2: erf part
-    term2 = 0.5 * beta_star * (special.erf(arg) + 1.0)
-    
-    # Prefactor
-    prefactor = np.exp(-B_ph ** 2 / (2.0 * Seff)) / np.sqrt(2.0 * np.pi * Seff)
-    
-    f_ph = prefactor * (term1 + term2)
-    
-    if len(f_ph) == 1:
-        return float(f_ph[0])
-    return f_ph
+    try:
+        # ===== COSMOLOGY SETUP =====
+        cosmo = FlatwCDM(H0=71, Om0=omega_m, w0=w, Ob0=0.044)
+        z_mean = (redshift_min + redshift_max) / 2.0
+        
+        # ===== POWER SPECTRUM =====
+        key = (round(omega_m, 4), round(w, 3))
+        
+        if key not in power_spectrum_cache:  
+            if verbose:
+                print("Computing power spectrum with CAMB...")
+            
+            pars = camb.CAMBparams()
+            pars.set_cosmology(
+                H0=cosmo.H0.value, 
+                ombh2=cosmo. Ob0 * (cosmo.H0.value / 100)**2, 
+                omch2=(cosmo.Om0 - cosmo.Ob0) * (cosmo.H0.value / 100)**2
+            )
+            pars.InitPower. set_params(ns=0.965)
+            redshift = np.linspace(redshift_min, redshift_max, 10)[: :-1]
+            pars. set_matter_power(redshifts=redshift, kmax=2.0)
+            
+            results = camb.get_results(pars)
+            kh, z_arr, pk = results.get_matter_power_spectrum(
+                minkh=1.e-4, maxkh=2, npoints=1000
+            )
+            Pk_average = np.mean(pk. T, axis=1)
+            
+            power_spectrum_cache[key] = (kh, Pk_average)
+        
+        kh, Pk_average = power_spectrum_cache[key]
+        Pk_interp = interp1d(kh, Pk_average, kind='cubic', 
+                             bounds_error=False, fill_value=0.0)
+        
+        # ===== LAGRANGIAN R GRID =====
+        # Use reference grid:  100 → 1 Mpc/h (logarithmic)
+        R_L = np.logspace(2, 0, 101)
+        
+        if verbose:
+            print(f"Using R range: {R_L.max():.1f} → {R_L. min():.1f} Mpc/h (Lagrangian)")
+        
+        # ===== COMPUTE SIGMA_CHI =====
+        if sigma_z > 0:
+            sigma_chi = compute_sigma_chi(z_mean, sigma_z, cosmo)
+        else:
+            sigma_chi = 0.0
+        
+        if verbose:
+            print(f"\nPhoto-z parameter: sigma_chi = {sigma_chi:.2f} Mpc/h")
+        
+        # ===== VARIANCE AND W PARAMETER =====
+        if verbose:
+            print("\nComputing variances and W parameter...")
+        
+        s_eff, dS_eff_dR, W_eff = compute_W_reference_method(
+            Pk_interp, kh, R_L, sigma_chi, dRperc=5e-3, verbose=verbose
+        )
+        
+        if sigma_z > 0:
+            # Also compute isotropic for comparison
+            if verbose:
+                print("\nComputing isotropic case for comparison...")
+            s_iso, dS_iso_dR, W_iso = compute_W_reference_method(
+                Pk_interp, kh, R_L, sigma_chi=0.0, dRperc=5e-3, verbose=verbose
+            )
+        else:
+            s_iso, dS_iso_dR, W_iso = s_eff, dS_eff_dR, W_eff
+        
+        # ===== BARRIER FUNCTION =====
+        alpha = a1 * abs(delta_v_lin) + a2
+        beta = b1 * abs(delta_v_lin) + b2
+
+        if sigma_z > 0:
+            B = alpha * (1.0 + (beta / np.sqrt(s_eff))**gamma)
+            dB_dS = -0.5 * alpha * beta**gamma * gamma * s_eff**(-gamma/2.0 - 1.0)
+            s = s_eff
+            dsdR = dS_eff_dR
+            W = W_eff
+        else:
+            B = alpha * (1.0 + (beta / np.sqrt(s_iso))**gamma)
+            dB_dS = -0.5 * alpha * beta**gamma * gamma * s_iso**(-gamma/2.0 - 1.0)
+            s = s_iso
+            dsdR = dS_iso_dR
+            W = W_iso
+        
+        # ===== DIAGNOSTICS =====
+        if verbose: 
+            print(f"\n{'='*70}")
+            print("DIAGNOSTICS")
+            print(f"{'='*70}")
+            print(f"Variance s:           min={np.min(s):.6e}, max={np.max(s):.6e}")
+            print(f"W parameter:         min={np.min(W):.6e}, max={np.max(W):.6e}")
+            print(f"s*W:                  min={np.min(s*W):.6e}, max={np.max(s*W):.6e}")
+            print(f"Barrier B:           min={np.min(B):.6e}, max={np.max(B):.6e}")
+            print(f"Barrier derivative:   min={np.min(dB_dS):.6e}, max={np.max(dB_dS):.6e}")
+        
+        # Check moving barrier validity
+        LDD = s * W - 0.25
+        n_valid = np.sum(LDD > 0)
+        
+        if verbose: 
+            print(f"\nMoving Barrier Validity (LDD = s*W - 1/4):")
+            print(f"  LDD range: [{np.min(LDD):.6e}, {np.max(LDD):.6e}]")
+            print(f"  Valid radii (LDD > 0): {n_valid}/{len(LDD)}")
+        
+        if n_valid < len(LDD) and verbose:
+            first_invalid = np.where(LDD <= 0)[0][0]
+            print(f"  ⚠️  First invalid at R_L = {R_L[first_invalid]:.2f} Mpc/h")
+        
+        # ===== MULTIPLICITY FUNCTION =====
+        valid_mask = LDD > 0
+        f_appr_R = np.zeros_like(s)
+        
+        if np.any(valid_mask):
+            f_appr_R[valid_mask] = f_S_MB_approx_func(
+                s[valid_mask], W[valid_mask], 
+                B[valid_mask], dB_dS[valid_mask]
+            ) * np.abs(dsdR[valid_mask])
+            f_appr_R[~valid_mask] = np.nan
+            
+            if verbose:
+                print(f"\n✓ VSF computed for {np.sum(valid_mask)}/{len(s)} valid radii")
+        else:
+            f_appr_R[: ] = np.nan
+            if verbose:
+                print(f"\n❌ No valid radii for moving barrier approximation!")
+        
+        # ===== LAGRANGIAN VSF =====
+        VSF_L = 3.0 / (4.0 * np.pi * R_L**3) * f_appr_R
+        
+        # ===== EULERIAN TRANSFORMATION =====
+        if delta_NL_func is not None:
+            # Use exact nonlinear transformation
+            delta_v_NL = delta_NL_func(delta_v_lin)
+            expansion_factor = (1.0 + delta_v_NL)**(-1.0/3.0)
+        else:
+            # Use linear approximation
+            expansion_factor = (1 + delta_v_lin/bias)**(-1/3)
+        
+        R_E = R_L * expansion_factor
+        VSF_E = VSF_L / expansion_factor
+        
+        if verbose:
+            print(f"\n{'='*70}")
+            print("COMPUTATION COMPLETE")
+            print(f"{'='*70}\n")
+        
+        return R_E, VSF_E, s
+        
+    except Exception as e: 
+        if verbose:
+            print(f"\n❌ Computation failed: {e}")
+            import traceback
+            traceback.print_exc()
+        return np.array([]), np.array([]), None

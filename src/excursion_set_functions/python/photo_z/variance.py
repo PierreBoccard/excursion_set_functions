@@ -1,277 +1,168 @@
 """
-Effective variance Seff and derivatives with photo-z (eqs. 88-92).
+Variance and covariance computations for filtered density fields.
 
-This module implements the effective variance and related quantities
-that incorporate photo-z damping.
+Implements computation of variance S(R), derivatives dS/dR, and the W parameter
+needed for moving barrier excursion set theory with photo-z effects.
 """
 
 import numpy as np
-from .window import tophat_window, tophat_window_derivative, tophat_window_second_derivative
-from .angular import G_photo_z
+from . window_functions import tophat_window_fourier, G_function
 
 
-def Seff_photo_z(Pk, k, R, sigma_chi):
+def compute_effective_variance_photoz(Pk_interp, kh, R, sigma_chi):
     """
-    Compute effective variance Seff(R) with photo-z damping.
+    Compute effective variance with photo-z using the analytical G-function.
     
-    From eq. (88):
-    S_eff(R) = 1/(2*pi^2) * integral dk k^2 P(k) W_T^2(kR) G(k*sigma_chi)
+    S_eff(R,z) = (1/2π²) ∫ dk k² P(k) |W_L(kR)|² G(k σ_χ)
     
-    Parameters
-    ----------
-    Pk : array
-        Power spectrum P(k)
-    k : array
-        Wavenumber array in h/Mpc
-    R : float or array
-        Smoothing radius in Mpc/h
+    Parameters:  
+    -----------
+    Pk_interp : callable
+        Interpolated power spectrum function P(k)
+    kh : array
+        Wavenumber grid in h/Mpc
+    R : float
+        Lagrangian radius in Mpc/h
     sigma_chi : float
-        Photo-z scatter in comoving distance units (Mpc/h)
+        Comoving radial uncertainty in Mpc/h (if 0, reduces to isotropic)
         
-    Returns
-    -------
-    Seff : float or array
-        Effective variance at radius R
+    Returns:
+    --------
+    S_eff : float
+        Effective variance
+        
+    Notes: 
+    ------
+    When sigma_chi = 0, this reduces to the standard isotropic variance.
     """
-    R = np.atleast_1d(np.asarray(R, dtype=float))
-    k = np.asarray(k, dtype=float)
-    Pk = np.asarray(Pk, dtype=float)
+    k = kh
+    Pk = Pk_interp(k)
+    W = tophat_window_fourier(k * R)
+    G = G_function(k, sigma_chi)
     
-    # Compute G(k*sigma_chi) once
-    G = G_photo_z(k * sigma_chi)
+    # Integrand:  k² P(k) |W|² G(k σ_χ)
+    integrand = k**2 * Pk * W**2 * G
     
-    Seff = np.zeros(len(R))
-    for i, r in enumerate(R):
-        x = k * r
-        W2 = tophat_window(x) ** 2
-        integrand = k ** 2 * Pk * W2 * G
-        Seff[i] = np.trapz(integrand, k) / (2.0 * np.pi ** 2)
+    # Integrate
+    S_eff = np. trapz(integrand, k) / (2.0 * np. pi**2)
     
-    if len(Seff) == 1:
-        return float(Seff[0])
-    return Seff
+    return S_eff
 
 
-def dSeff_dR_photo_z(Pk, k, R, sigma_chi):
+def compute_cross_covariance_photoz(Pk_interp, kh, R1, R2, sigma_chi):
     """
-    Compute first derivative dSeff/dR with photo-z damping.
+    Compute cross-covariance Ξ(R1, R2) with photo-z damping.
     
-    From eq. (89):
-    dS_eff/dR = 1/(pi^2) * integral dk k^3 P(k) W_T(kR) W'_T(kR) G(k*sigma_chi)
+    Ξ(R1, R2) = (1/2π²) ∫ dk k² P(k) W_T(k R1) W_T(k R2) G(k σ_χ)
     
-    Parameters
-    ----------
-    Pk : array
-        Power spectrum P(k)
-    k : array
-        Wavenumber array in h/Mpc
-    R : float or array
-        Smoothing radius in Mpc/h
+    Parameters: 
+    -----------
+    Pk_interp : callable
+        Interpolated power spectrum
+    kh : array
+        Wavenumber grid
+    R1, R2 : float
+        Filter radii
+    sigma_chi :   float
+        Comoving radial uncertainty
+        
+    Returns:  
+    --------
+    Xi_12 : float
+        Cross-covariance value
+        
+    Notes:
+    ------
+    Used to compute finite-difference derivatives for the W parameter.
+    """
+    k = kh
+    Pk = Pk_interp(k)
+    
+    W1 = tophat_window_fourier(k * R1)
+    W2 = tophat_window_fourier(k * R2)
+    G = G_function(k, sigma_chi)
+    
+    integrand = k**2 * Pk * W1 * W2 * G
+    Xi_12 = np.trapz(integrand, k) / (2.0 * np.pi**2)
+    
+    return Xi_12
+
+
+def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, verbose=True):
+    """
+    Compute W parameter using the reference covariance matrix method.
+    
+    Matches the integration. py:: sigma2_2_TopHat_numdiff approach:  
+    1. Compute cross-covariances Ξ(R±ε, R±ε) for small ε
+    2. Compute mixed second derivative:  ∂²Ξ/∂R₁∂R₂|_{R₁=R₂}
+    3. Normalize by (dS/dR)² to get W = sigma2_2 / (dS/dR)²
+    
+    This W parameter is what enters the moving barrier formula f_S_MB_approx.
+    
+    Parameters:
+    -----------
+    Pk_interp : callable
+        Interpolated power spectrum
+    kh :  array
+        Wavenumber grid
+    R_array : array
+        Array of Lagrangian radii
     sigma_chi : float
-        Photo-z scatter in comoving distance units (Mpc/h)
+        Comoving radial uncertainty
+    dRperc : float, optional
+        Relative step size for finite differences (default 5e-3 = 0.5%)
+    verbose : bool, optional
+        Print progress messages (default True)
         
-    Returns
-    -------
-    dSeff_dR : float or array
-        First derivative of effective variance at radius R
-    """
-    R = np.atleast_1d(np.asarray(R, dtype=float))
-    k = np.asarray(k, dtype=float)
-    Pk = np.asarray(Pk, dtype=float)
-    
-    # Compute G(k*sigma_chi) once
-    G = G_photo_z(k * sigma_chi)
-    
-    dSeff = np.zeros(len(R))
-    for i, r in enumerate(R):
-        x = k * r
-        W = tophat_window(x)
-        dW = tophat_window_derivative(x)
-        # Note: dW/dR = dW/dx * dx/dR = dW/dx * k
-        integrand = k ** 3 * Pk * W * dW * G
-        dSeff[i] = np.trapz(integrand, k) / (np.pi ** 2)
-    
-    if len(dSeff) == 1:
-        return float(dSeff[0])
-    return dSeff
-
-
-def d2Seff_dR2_photo_z(Pk, k, R, sigma_chi):
-    """
-    Compute second derivative d^2Seff/dR^2 with photo-z damping.
-    
-    From eq. (90):
-    d^2S_eff/dR^2 = 1/(pi^2) * integral dk k^2 P(k) [k*W'_T(kR)]^2 + W_T(kR)*[k^2*W''_T(kR)]} G(k*sigma_chi)
-    
-    Parameters
-    ----------
-    Pk : array
-        Power spectrum P(k)
-    k : array
-        Wavenumber array in h/Mpc
-    R : float or array
-        Smoothing radius in Mpc/h
-    sigma_chi : float
-        Photo-z scatter in comoving distance units (Mpc/h)
+    Returns:
+    --------
+    S :  array
+        Variance at each radius
+    dS_dR : array
+        First derivative dS/dR
+    W :   array
+        W = sigma2_2 / (dS/dR)²
         
-    Returns
-    -------
-    d2Seff_dR2 : float or array
-        Second derivative of effective variance at radius R
+    Notes:
+    ------
+    The W parameter encodes information about correlations in the random walk
+    and is essential for the moving barrier approximation to be accurate.
     """
-    R = np.atleast_1d(np.asarray(R, dtype=float))
-    k = np.asarray(k, dtype=float)
-    Pk = np.asarray(Pk, dtype=float)
+    N = len(R_array)
+    S = np.zeros(N)
+    dS_dR = np.zeros(N)
+    W = np.zeros(N)
     
-    # Compute G(k*sigma_chi) once
-    G = G_photo_z(k * sigma_chi)
+    if verbose:
+        print(f"Computing S, dS/dR, and W for {N} radii using reference method...")
     
-    d2Seff = np.zeros(len(R))
-    for i, r in enumerate(R):
-        x = k * r
-        W = tophat_window(x)
-        dW = tophat_window_derivative(x)
-        d2W = tophat_window_second_derivative(x)
-        # d^2S/dR^2 = d/dR of dS/dR
-        # Using: d(W^2)/dR = 2*W*dW/dR = 2*k*W*dW'
-        # d^2(W^2)/dR^2 = 2*(k*dW')^2 + 2*W*(k^2*dW'')
-        integrand = k ** 2 * Pk * ((k * dW) ** 2 + W * k ** 2 * d2W) * G
-        d2Seff[i] = np.trapz(integrand, k) / (np.pi ** 2)
-    
-    if len(d2Seff) == 1:
-        return float(d2Seff[0])
-    return d2Seff
-
-
-def DW_photo_z(Pk, k, R, sigma_chi):
-    """
-    Compute diffusion coefficient DW(R) with photo-z.
-    
-    From eq. (91):
-    D_W(R) = (d^2S_eff/dR^2) / (dS_eff/dR)^2
-    
-    Parameters
-    ----------
-    Pk : array
-        Power spectrum P(k)
-    k : array
-        Wavenumber array in h/Mpc
-    R : float or array
-        Smoothing radius in Mpc/h
-    sigma_chi : float
-        Photo-z scatter in comoving distance units (Mpc/h)
+    for i, R in enumerate(R_array):
+        # Grid of perturbations:   [R(1-ε), R, R(1+ε)]
+        R_minus = R * (1.0 - dRperc)
+        R_plus = R * (1.0 + dRperc)
         
-    Returns
-    -------
-    DW : float or array
-        Diffusion coefficient at radius R
-    """
-    dSeff = dSeff_dR_photo_z(Pk, k, R, sigma_chi)
-    d2Seff = d2Seff_dR2_photo_z(Pk, k, R, sigma_chi)
-    
-    return d2Seff / (dSeff ** 2)
-
-
-def Xi_eff_photo_z(Pk, k, R, sigma_chi):
-    """
-    Compute cross-covariance matrix Xi_eff(R_i, R_j) with photo-z.
-    
-    From eq. (92):
-    Xi_ij = 1/(2*pi^2) * integral dk k^2 P(k) W_T(kR_i) W_T(kR_j) G(k*sigma_chi)
-    
-    Note: The diagonal elements Xi_ii = Seff(R_i)
-    
-    Parameters
-    ----------
-    Pk : array
-        Power spectrum P(k)
-    k : array
-        Wavenumber array in h/Mpc
-    R : array
-        Array of smoothing radii in Mpc/h
-    sigma_chi : float
-        Photo-z scatter in comoving distance units (Mpc/h)
+        # Compute covariance matrix elements
+        # [0]:   Ξ(R-, R-)  [-- case]
+        # [1]:  Ξ(R+, R-)  [+- case]
+        # [2]:   Ξ(R+, R+)  [++ case]
+        Xi_mm = compute_effective_variance_photoz(Pk_interp, kh, R_minus, sigma_chi)
+        Xi_pm = compute_cross_covariance_photoz(Pk_interp, kh, R_plus, R_minus, sigma_chi)
+        Xi_pp = compute_effective_variance_photoz(Pk_interp, kh, R_plus, sigma_chi)
         
-    Returns
-    -------
-    Xi_eff : 2D array
-        Cross-covariance matrix of shape (len(R), len(R))
-    """
-    R = np.atleast_1d(np.asarray(R, dtype=float))
-    k = np.asarray(k, dtype=float)
-    Pk = np.asarray(Pk, dtype=float)
-    
-    len_R = len(R)
-    len_k = len(k)
-    
-    # Compute G(k*sigma_chi) once
-    G = G_photo_z(k * sigma_chi)
-    
-    # Pre-compute all tophat windows using broadcasting
-    # W_all[i, j] = W_T(k[j] * R[i])
-    W_all = np.zeros((len_R, len_k))
-    for i, r in enumerate(R):
-        W_all[i] = tophat_window(k * r)
-    
-    # Compute integrand base: k^2 * P(k) * G
-    integrand_base = k ** 2 * Pk * G  # shape: (len_k,)
-    
-    # Compute cross-covariance matrix using vectorized outer products
-    # Xi[i,j] = trapz(integrand_base * W_all[i] * W_all[j], k) / (2*pi^2)
-    Xi = np.zeros((len_R, len_R))
-    for i in range(len_R):
-        for j in range(i + 1):
-            integrand = integrand_base * W_all[i] * W_all[j]
-            Xi[i, j] = np.trapz(integrand, k) / (2.0 * np.pi ** 2)
-            Xi[j, i] = Xi[i, j]  # Symmetric
-    
-    return Xi
-
-
-def Gamma_eff_from_Xi(Xi_eff, Seff):
-    """
-    Compute Gamma_eff_dd from cross-covariance matrix.
-    
-    From eqs. (76-78):
-    Gamma_delta_delta is obtained from the value-slope moments:
-    <delta^2> = S
-    <delta * dot_delta> = dC(S,S')/dS' |_{S'=S}
-    <dot_delta^2> = d^2C(S,S')/(dS*dS') |_{S'=S}
-    
-    Parameters
-    ----------
-    Xi_eff : 2D array
-        Cross-covariance matrix from Xi_eff_photo_z
-    Seff : array
-        Diagonal of Xi_eff (effective variances)
+        # Main variance (at R)
+        S[i] = compute_effective_variance_photoz(Pk_interp, kh, R, sigma_chi)
         
-    Returns
-    -------
-    Gamma_eff_dd : array
-        Value-slope covariance for each radius
-    """
-    n = len(Seff)
-    if n < 3:
-        raise ValueError("Need at least 3 radii for finite differences")
-    
-    Gamma_eff = np.zeros(n)
-    
-    # Use finite differences to estimate derivatives
-    for i in range(1, n - 1):
-        # Central difference for d<delta*dot_delta>/dS
-        dS = (Seff[i + 1] - Seff[i - 1]) / 2.0
+        # Compute sigma2_2 (mixed second derivative of covariance)
+        # This is:   ∂²Ξ(R1,R2)/∂R1∂R2 |_{R1=R2=R}
+        sigma2_2 = 0.25 * (Xi_pp - 2.0 * Xi_pm + Xi_mm) / (R * dRperc)**2
         
-        # <dot_delta^2> ≈ d^2 Xi / dS_i dS_j evaluated at i=j
-        # Using second-order finite difference
-        d2Xi = (Xi_eff[i + 1, i + 1] - 2 * Xi_eff[i, i] + Xi_eff[i - 1, i - 1]) / (dS ** 2)
+        # Compute dS/dR using central difference
+        dS_dR[i] = (Xi_pp - Xi_mm) / (2.0 * R * dRperc)
         
-        # Gamma = <dot_delta^2> - <delta*dot_delta>^2/<delta^2>
-        # For a Markov walk, <delta*dot_delta>/<delta^2> = 1/(2S)
-        # So Gamma ≈ <dot_delta^2> - 1/(4S)
-        Gamma_eff[i] = max(d2Xi - 1.0 / (4.0 * Seff[i]), 1e-10)
+        # W parameter
+        W[i] = sigma2_2 / (dS_dR[i]**2)
+        
+        if verbose and ((i+1) % 20 == 0 or i == N-1):
+            print(f"  Progress: {i+1}/{N} radii computed")
     
-    # Extrapolate to boundaries
-    Gamma_eff[0] = Gamma_eff[1]
-    Gamma_eff[-1] = Gamma_eff[-2]
-    
-    return Gamma_eff
+    return S, dS_dR, W
