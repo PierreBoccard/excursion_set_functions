@@ -1,3 +1,29 @@
+"""
+Cubic spline interpolation and integration utilities.
+
+Provides fast cubic spline operations optimized with Numba JIT compilation.
+Implements not-a-knot boundary conditions for natural interpolation behavior.
+
+Key Features
+------------
+- Cubic spline coefficient computation (not-a-knot conditions)
+- Spline evaluation at arbitrary points
+- First derivative computation
+- Definite and indefinite integration
+- Implicit/explicit coefficient transformations
+
+Main Functions
+--------------
+cubic_spline_coeffs : Compute spline coefficients from data
+get_values : Evaluate spline at points
+get_derivative : Compute spline derivative
+get_integral : Integrate spline over interval
+
+Performance
+-----------
+All functions are JIT-compiled with Numba for high performance.
+Optimized for sorted evaluation points to minimize interval searches.
+"""
 import numpy as np
 from numba import jit, prange
 from numba.core import types
@@ -6,6 +32,36 @@ from numba.typed import Dict
 
 @jit(nopython=True)
 def Solve_tridiagonal_system(a,b,c,d,w,g,p):
+    """
+    Solve tridiagonal linear system using Thomas algorithm.
+    
+    Efficient O(n) solver for systems of the form:
+    b[0]*p[0] + c[0]*p[1] = d[0]
+    a[i-1]*p[i-1] + b[i]*p[i] + c[i]*p[i+1] = d[i]
+    a[n-2]*p[n-2] + b[n-1]*p[n-1] = d[n-1]
+    
+    Parameters
+    ----------
+    a : array_like
+        Lower diagonal (length n-1)
+    b : array_like
+        Main diagonal (length n)
+    c : array_like
+        Upper diagonal (length n-1)
+    d : array_like
+        Right-hand side vector (length n)
+    w : array_like
+        Work array for forward elimination (length n-1)
+    g : array_like
+        Work array for forward elimination (length n)
+    p : array_like
+        Output solution vector (length n), modified in place
+        
+    Notes
+    -----
+    Solution is returned in the array p, which is modified in place.
+    Work arrays w and g are also modified.
+    """
     #a = Lower Diag, b = Main Diag, c = Upper Diag, d = solution vector
     n = len(d)
     #w= np.zeros(n-1)
@@ -26,6 +82,33 @@ def Solve_tridiagonal_system(a,b,c,d,w,g,p):
 
 @jit(nopython=True)
 def Tridiagonal_elements_for_k_not_a_knot(x,y,a, b, c, d):
+    """
+    Build tridiagonal system for cubic spline with not-a-knot boundary conditions.
+    
+    Sets up the linear system to solve for cubic spline derivatives at knots.
+    The not-a-knot condition enforces continuity of the third derivative at
+    the second and second-to-last interior points.
+    
+    Parameters
+    ----------
+    x : array_like
+        Knot positions (length n)
+    y : array_like
+        Function values at knots (length n)
+    a : array_like
+        Output lower diagonal (length n-1), modified in place
+    b : array_like
+        Output main diagonal (length n), modified in place
+    c : array_like
+        Output upper diagonal (length n-1), modified in place
+    d : array_like
+        Output right-hand side (length n), modified in place
+        
+    Notes
+    -----
+    The not-a-knot condition is more natural than natural splines for
+    functions without known endpoint derivatives.
+    """
     #a = Lower Diag, b = Main Diag, c = Upper Diag, d = solution vector
     #n = len(x)
     #a = np.zeros(n-1)
@@ -54,6 +137,23 @@ def Tridiagonal_elements_for_k_not_a_knot(x,y,a, b, c, d):
 
 @jit(nopython=True)
 def Tridiagonal_elements_for_k_not_a_knot_left(x,y,a, b, c, d,second_der_xn):
+    """
+    Build tridiagonal system with not-a-knot on left and fixed second derivative on right.
+    
+    Hybrid boundary conditions: not-a-knot at the beginning and specified
+    second derivative at the end point.
+    
+    Parameters
+    ----------
+    x : array_like
+        Knot positions
+    y : array_like
+        Function values at knots
+    a, b, c, d : array_like
+        Tridiagonal system arrays, modified in place
+    second_der_xn : float
+        Specified second derivative at right endpoint
+    """
     f_first = - 1. / (x[2] - x[1]) ** 2
     b[0] = 1. / (x[1] - x[0]) ** 2
     c[0] = 1. / (x[1] - x[0]) ** 2 - 1. / (x[2] - x[1]) ** 2
@@ -72,6 +172,33 @@ def Tridiagonal_elements_for_k_not_a_knot_left(x,y,a, b, c, d,second_der_xn):
 
 @jit(nopython=True)
 def cubic_spline_coeffs(x,y):
+    """
+    Compute cubic spline coefficients with not-a-knot boundary conditions.
+    
+    Constructs a C² continuous piecewise cubic polynomial interpolating
+    the data points (x, y). Returns coefficients in implicit form
+    (relative to interval endpoints).
+    
+    Parameters
+    ----------
+    x : array_like
+        Knot positions, must be strictly increasing (length n)
+    y : array_like
+        Function values at knots (length n)
+        
+    Returns
+    -------
+    Coeff : ndarray
+        Coefficient matrix (n-1, 4) where row i contains [a, b, c, d]
+        for the cubic on interval [x[i], x[i+1]]:
+        S_i(t) = a + b*t + c*t² + d*t³
+        where t = (x - x[i]) / (x[i+1] - x[i])
+        
+    Notes
+    -----
+    Coefficients are in "implicit" form, scaled by interval width.
+    Use explicit_from_implicit_coeffs to convert to standard polynomial form.
+    """
     #a = Lower Diag, b = Main Diag, c = Upper Diag, d = solution vector
     n = len(x)
     Coeff = np.zeros((len(x)-1,4))
@@ -97,6 +224,26 @@ def cubic_spline_coeffs(x,y):
 
 @jit(nopython=True)
 def explicit_from_implicit_coeffs(Coeff,x):
+    """
+    Convert spline coefficients from implicit to explicit form.
+    
+    Transforms coefficients from interval-scaled form to standard polynomial
+    coefficients in terms of the original x coordinate:
+    S(x) = c₀ + c₁*x + c₂*x² + c₃*x³
+    
+    Parameters
+    ----------
+    Coeff : ndarray
+        Coefficient matrix (n-1, 4) in implicit form, modified in place
+    x : array_like
+        Knot positions (length n)
+        
+    Notes
+    -----
+    This function modifies Coeff in place. After calling, the coefficients
+    represent the polynomial in the original x coordinate system rather than
+    the normalized interval parameter t.
+    """
     dx  = x[1:] - x[:-1]
     Coeff[:,1] /= dx
     Coeff[:,2] /= dx ** 2
@@ -149,6 +296,31 @@ def get_derivatives_and_values(derivative_out,y_out,x_der,Coeffs,x_input_arr):
 
 @jit(nopython=True)
 def get_values_sorted(x_eval,x,coeffs):
+    """
+    Evaluate spline at sorted points (efficient version).
+    
+    Evaluates cubic spline at multiple points. Assumes x_eval is already
+    sorted in ascending order for optimal performance.
+    
+    Parameters
+    ----------
+    x_eval : array_like
+        Sorted evaluation points
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form (n-1, 4)
+        
+    Returns
+    -------
+    y_out : ndarray
+        Spline values at x_eval
+        
+    Notes
+    -----
+    For unsorted evaluation points, use get_values instead.
+    This function is faster when x_eval is pre-sorted.
+    """
     len_out = len(x_eval)
     len_x = len(x)
     y_out = np.empty(len_out)
@@ -173,6 +345,23 @@ def get_values_sorted(x_eval,x,coeffs):
 
 @jit(nopython=True)
 def get_single_value(x_eval,x,coeffs):
+    """
+    Evaluate spline at a single point.
+    
+    Parameters
+    ----------
+    x_eval : float
+        Single evaluation point
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form
+        
+    Returns
+    -------
+    y : float
+        Spline value at x_eval
+    """
     len_x = len(x)
     delta_x = 0.
     t = 0.
@@ -188,6 +377,26 @@ def get_single_value(x_eval,x,coeffs):
 
 @jit(nopython=True)
 def get_values(x_eval,x,coeffs):
+    """
+    Evaluate spline at arbitrary (unsorted) points.
+    
+    Sorts evaluation points internally for efficiency, then evaluates spline.
+    Use this when x_eval may not be sorted.
+    
+    Parameters
+    ----------
+    x_eval : array_like
+        Evaluation points (any order)
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form (n-1, 4)
+        
+    Returns
+    -------
+    y_out : ndarray
+        Spline values at x_eval (in original order)
+    """
     len_out = len(x_eval)
     len_x = len(x)
     y_out = np.empty(len_out)
@@ -212,6 +421,26 @@ def get_values(x_eval,x,coeffs):
 
 @jit(nopython=True)
 def get_derivative_sorted(x_eval,x,coeffs):
+    """
+    Evaluate spline derivative at sorted points.
+    
+    Computes first derivative dS/dx at evaluation points.
+    Assumes x_eval is sorted for efficiency.
+    
+    Parameters
+    ----------
+    x_eval : array_like
+        Sorted evaluation points
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form
+        
+    Returns
+    -------
+    dy_out : ndarray
+        Spline derivative values at x_eval
+    """
     len_out = len(x_eval)
     len_x = len(x)
     y_out = np.empty(len_out)
@@ -234,6 +463,26 @@ def get_derivative_sorted(x_eval,x,coeffs):
 
 @jit(nopython=True)
 def get_derivative(x_eval,x,coeffs):
+    """
+    Evaluate spline derivative at arbitrary (unsorted) points.
+    
+    Computes first derivative at evaluation points. Handles unsorted input
+    by sorting internally.
+    
+    Parameters
+    ----------
+    x_eval : array_like
+        Evaluation points (any order)
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form
+        
+    Returns
+    -------
+    dy_out : ndarray
+        Spline derivative values at x_eval (in original order)
+    """
     len_out = len(x_eval)
     len_x = len(x)
     y_out = np.empty(len_out)
@@ -256,6 +505,32 @@ def get_derivative(x_eval,x,coeffs):
     
 @jit(nopython=True)
 def get_integral(x1, x2, x, coeffs):
+    """
+    Compute definite integral of spline from x1 to x2.
+    
+    Integrates the cubic spline over the interval [x1, x2]:
+    ∫_{x1}^{x2} S(x) dx
+    
+    Parameters
+    ----------
+    x1 : float
+        Lower integration limit
+    x2 : float
+        Upper integration limit
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form
+        
+    Returns
+    -------
+    integral : float
+        Definite integral value
+        
+    Notes
+    -----
+    Handles intervals spanning multiple spline pieces automatically.
+    """
     len_x = len(x)
     len_x_mn2 = len_x - 2
     i_out = 0
@@ -267,9 +542,9 @@ def get_integral(x1, x2, x, coeffs):
     delta_x = x[i_out+1] - x[i_out]
     t = (x1 - x[i_out]) / delta_x
     
-    integr_out = -(coeffs[i_out,0] * t + \
-                   coeffs[i_out,1] * t * t / 2. + \
-                   coeffs[i_out,2] * t * t * t / 3. + \
+    integr_out = -(coeffs[i_out,0] * t +
+                   coeffs[i_out,1] * t * t / 2. +
+                   coeffs[i_out,2] * t * t * t / 3. +
                    coeffs[i_out,3] * t * t * t * t / 4.) * delta_x
 
     while ((x2 >= x[i_out+1]) & (i_out < len_x_mn2)) :
@@ -291,6 +566,30 @@ def get_integral(x1, x2, x, coeffs):
 
 @jit(nopython=True)
 def get_integral_array(x_eval,x,coeffs):
+    """
+    Compute cumulative integrals over consecutive intervals.
+    
+    For array [x₀, x₁, x₂, ..., xₙ], computes:
+    [∫_{x₀}^{x₁} S(x)dx, ∫_{x₁}^{x₂} S(x)dx, ..., ∫_{xₙ₋₁}^{xₙ} S(x)dx]
+    
+    Parameters
+    ----------
+    x_eval : array_like
+        Boundaries of integration intervals (length n+1)
+    x : array_like
+        Spline knot positions
+    coeffs : ndarray
+        Spline coefficients in explicit form
+        
+    Returns
+    -------
+    y_out : ndarray
+        Array of integral values (length n)
+        
+    Notes
+    -----
+    Efficient for computing many consecutive integrals.
+    """
     len_out = len(x_eval)-1
     len_x = len(x)
     y_out = np.empty(len_out)

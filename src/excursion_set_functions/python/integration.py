@@ -1,4 +1,35 @@
 import numpy as np
+"""
+Analytical integration of power spectra with window functions.
+
+Computes covariance matrices and variances for filtered cosmological
+density fields using analytical integration methods. Combines spline
+interpolation with analytical solutions for oscillatory integrals.
+
+Key Functions
+-------------
+C_ij_TopHat : Covariance matrix for top-hat filtered fields
+sigma2_TopHat : Variance of top-hat filtered density
+dSdR_TopHat : Derivative of variance with respect to radius
+cholensky_decomposition_matrix_from_Cij : Cholesky decomposition of covariance
+
+Integration Methods
+-------------------
+- Low-k: Taylor series expansion
+- High-k: Analytical integration of spline x trigonometric functions
+- Uses sine/cosine integrals (Si, Ci) for exact results
+
+Applications
+------------
+Essential for excursion set theory calculations in cosmology:
+- Computing halo mass functions
+- Predicting cluster abundances
+- Understanding structure formation
+
+References
+----------
+Window function formalism: Bardeen et al. (1986), ApJ 304, 15
+"""
 from numba import jit, prange
 from numba.core import types
 #from numba.typed import Dict
@@ -13,6 +44,32 @@ from .spline import *
 float_array = types.float64[::1]
 
 def cholensky_decomposition_matrix_from_Cij(Cij,Cijtype='numpy_narray',out_type='linearized'):
+    """
+    Compute Cholesky decomposition of covariance matrix.
+    
+    Decomposes covariance matrix C as C = L L^T where L is lower triangular.
+    Used to generate correlated random walks in excursion set simulations.
+    
+    Parameters
+    ----------
+    Cij : ndarray or dict
+        Covariance matrix, either as 2D array or dictionary
+    Cijtype : str, optional
+        Input format: 'numpy_narray' or 'dict'
+    out_type : str, optional
+        Output format: 'linearized' (1D array) or dict
+        
+    Returns
+    -------
+    L_ij_lin : ndarray or dict
+        Lower triangular Cholesky factor
+        If out_type='linearized', returns 1D array of length n(n+1)/2
+        
+    Notes
+    -----
+    Linearized output stores only lower triangular elements in row-major order,
+    reducing memory usage for large matrices.
+    """
     if Cijtype == 'numpy_narray':
         lenR = Cij.shape[0]
         L_ij = dict()
@@ -47,14 +104,74 @@ def cholensky_decomposition_matrix_from_Cij(Cij,Cijtype='numpy_narray',out_type=
 
 @jit(nopython=True,cache=True)
 def TOPHAT_Taylor(x):
+    """
+    Taylor series expansion of top-hat window function for small x.
+    
+    Computes W(x)² where W(x) = 3(sin(x) - x*cos(x))/x³ for small x
+    to avoid numerical instability near x=0.
+    
+    Parameters
+    ----------
+    x : float or array_like
+        Argument (typically k*R where k is wavenumber, R is filter radius)
+        
+    Returns
+    -------
+    float or array_like
+        Top-hat window function squared, accurate for |x| < 0.1
+        
+    Notes
+    -----
+    Series expansion to 8th order provides sufficient accuracy.
+    """
     return 1. - x**2/10. +x**4/280. - x**6/15120. +x**8/1330560.
 
 @jit(nopython=True,cache=True)
 def dx_squareTOPHAT_Taylor(x):
+    """
+    Taylor expansion of derivative of squared top-hat window function.
+    
+    Computes d(W²)/dx for small x to avoid numerical instability.
+    
+    Parameters
+    ----------
+    x : float or array_like
+        Argument value(s)
+        
+    Returns
+    -------
+    float or array_like
+        Derivative of W²(x) with respect to x
+    """
     return 2. * (-x/5. +x**3/70. - x**5/2520. +x**7/166320.) * (1. - x**2/10. +x**4/280. - x**6/15120. +x**8/1330560.)
 
 @jit(nopython=True,cache=True)
 def top_hat_rk_HR(r, k,X0=1e-1):
+    """
+    Real-space top-hat window function in Fourier space.
+    
+    Computes W(kR) = 3(sin(kR) - kR*cos(kR))/(kR)³
+    Uses Taylor expansion for small kR to avoid numerical issues.
+    
+    Parameters
+    ----------
+    r : float
+        Filter radius
+    k : array_like
+        Wavenumber array
+    X0 : float, optional
+        Threshold for switching to Taylor series (default 0.1)
+        
+    Returns
+    -------
+    ndarray
+        Window function values at each k
+        
+    Notes
+    -----
+    The top-hat window in real space becomes this sinc-like function
+    in Fourier space. Essential for computing power spectrum filtering.
+    """
     x = r * k
     OUT = np.zeros(len(x))
     OUT[x <= X0] = TOPHAT_Taylor(x[x <= X0])
@@ -64,6 +181,30 @@ def top_hat_rk_HR(r, k,X0=1e-1):
 
 @jit(nopython=True,cache=True)
 def dr_square_top_hat_rk_HR(r, k,X0=1e-1):
+    """
+    Derivative of squared top-hat window function with respect to radius.
+    
+    Computes d(W²(kR))/dR = k * d(W²)/d(kR) for variance derivatives.
+    
+    Parameters
+    ----------
+    r : float
+        Filter radius
+    k : array_like
+        Wavenumber array
+    X0 : float, optional
+        Threshold for Taylor expansion (default 0.1)
+        
+    Returns
+    -------
+    ndarray
+        Derivative values at each k
+        
+    Notes
+    -----
+    Used in computing dσ²/dR, which relates first crossing rates
+    to halo mass in excursion set theory.
+    """
     x = r * k
     x = r * k
     OUT = np.zeros(len(x))
@@ -75,12 +216,44 @@ def dr_square_top_hat_rk_HR(r, k,X0=1e-1):
 
 @jit(nopython=True,cache=True)
 def Factorial(N):
+    """
+    Compute factorial N! for integer N.
+    
+    Parameters
+    ----------
+    N : int
+        Non-negative integer
+        
+    Returns
+    -------
+    int
+        N! = N * (N-1) * ... * 2 * 1
+    """
     if N <= 1:
         return 1
     return np.prod(np.arange(N)+1)
 
 @jit(nopython=True,cache=True)
 def a_fac(pow):
+    """
+    Compute coefficient for Taylor expansion of window function product.
+    
+    Returns the coefficient a_n in the small-k expansion of W(k*R1)*W(k*R2).
+    
+    Parameters
+    ----------
+    pow : int
+        Power index (must be even)
+        
+    Returns
+    -------
+    float
+        Taylor coefficient
+        
+    Notes
+    -----
+    Only even powers contribute; odd powers return 0.
+    """
     if pow % 2 != 0:
         return 0.
     elif pow == 0:
@@ -90,6 +263,35 @@ def a_fac(pow):
 
 @jit(nopython=True,cache=True)
 def IntegrationSmallK(Pk0,k0,n,R1,R2,Omax=8):
+    """
+    Compute small-k contribution to covariance integral via Taylor expansion.
+    
+    For k → 0, uses power series expansion of window functions to
+    analytically integrate Pk(k) * k^(n+2) * W(k*R1) * W(k*R2).
+    
+    Parameters
+    ----------
+    Pk0 : float
+        Power spectrum normalization at k=k0
+    k0 : float
+        Reference wavenumber (typically smallest k in array)
+    n : float
+        Power spectrum spectral index (P(k) ∝ k^n at low k)
+    R1, R2 : float
+        Filter radii
+    Omax : int, optional
+        Maximum order of Taylor expansion (default 8)
+        
+    Returns
+    -------
+    float
+        Integral contribution from k < k0
+        
+    Notes
+    -----
+    This avoids numerical issues from oscillatory window functions
+    at small k*R. Higher Omax improves accuracy but is rarely needed.
+    """
     ALPHA = np.zeros(9)
     ALPHA[0] = 1.
     ALPHA[2] = a_fac(2)
@@ -109,6 +311,38 @@ def IntegrationSmallK(Pk0,k0,n,R1,R2,Omax=8):
 
 ##########
 def C_ij_TopHat_MAIN(Coeffs, x, a, b):
+    """
+    Compute covariance integral for high-k regime using analytical methods.
+    
+    Analytically integrates cubic spline representation of power spectrum
+    multiplied by oscillatory window functions using sine/cosine integrals.
+    
+    Parameters
+    ----------
+    Coeffs : ndarray
+        Cubic spline coefficients for P(k) in explicit form (n-1, 4)
+    x : array_like
+        Wavenumber array (knot positions)
+    a : float
+        Inverse of first filter radius (1/R1)
+    b : float
+        Inverse of second filter radius (1/R2)
+        
+    Returns
+    -------
+    float
+        Covariance integral contribution C_ij for k > threshold
+        
+    Notes
+    -----
+    Uses analytical formulas involving Si(x) and Ci(x) (sine and cosine
+    integrals) to exactly integrate products of polynomials with sin/cos.
+    This is much more accurate than numerical quadrature for oscillatory
+    integrands and avoids issues with adaptive integration.
+    
+    The formulation handles both cross-correlations (a≠b) and 
+    auto-correlations (a=b) with appropriate limiting behavior.
+    """
     #INT0 = 0.
     #if SmallK_args == 0:
     #    INT0 = 0
@@ -179,6 +413,31 @@ def C_ij_TopHat_MAIN(Coeffs, x, a, b):
 
 def C_ii_TopHat_MAIN(
         Coeffs, x, a):
+    """
+    Compute variance integral for high-k regime (diagonal covariance case).
+    
+    Specialized version of C_ij_TopHat_MAIN for auto-correlation (i=j),
+    taking advantage of simplifications when both radii are equal.
+    
+    Parameters
+    ----------
+    Coeffs : ndarray
+        Cubic spline coefficients for P(k)
+    x : array_like
+        Wavenumber array
+    a : float
+        Inverse filter radius (1/R)
+        
+    Returns
+    -------
+    float
+        Variance integral σ²(R) for k > threshold
+        
+    Notes
+    -----
+    Uses Si(2ax) and Ci(2ax) integrals. More efficient than general
+    C_ij_TopHat_MAIN due to symmetry simplifications.
+    """
     #INT0 = 0.
     #if SmallK_args == 0:
     #    INT0 = 0
@@ -229,6 +488,37 @@ def C_ii_TopHat_MAIN(
 
 def C_ij_TopHat_MAIN_lowR(
         Pk, k, R1, R2, IDchange, OMAX, n):
+    """
+    Compute covariance integral for low-k regime using direct integration.
+    
+    For k*R << 1, window functions are smooth and non-oscillatory, allowing
+    simple polynomial integration of the spline.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum values
+    k : array_like
+        Wavenumber array
+    R1, R2 : float
+        Filter radii
+    IDchange : int
+        Index where high-k regime begins
+    OMAX : int
+        Order for small-k Taylor expansion
+    n : float
+        Spectral index
+        
+    Returns
+    -------
+    float
+        Covariance for k < k_threshold
+        
+    Notes
+    -----
+    Combines Taylor expansion at very low k with spline integration
+    up to the transition scale where oscillatory methods take over.
+    """
     
     coeffs = cubic_spline_coeffs(k, Pk * k**2 * top_hat_rk_HR(R1, k) * top_hat_rk_HR(R2, k))
     if OMAX <= 0:
@@ -245,6 +535,31 @@ def C_ij_TopHat_MAIN_lowR(
 
 def C_ii_TopHat_MAIN_lowR(
         Pk, k, R, IDchange, OMAX, n):
+    """
+    Compute variance integral for low-k regime.
+    
+    Diagonal (auto-correlation) version of C_ij_TopHat_MAIN_lowR.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum
+    k : array_like
+        Wavenumber array
+    R : float
+        Filter radius
+    IDchange : int
+        Transition index to high-k regime
+    OMAX : int
+        Taylor expansion order
+    n : float
+        Spectral index
+        
+    Returns
+    -------
+    float
+        Variance for k < k_threshold
+    """
     
     coeffs = cubic_spline_coeffs(k, Pk * k**2 * top_hat_rk_HR(R, k)**2)
     if OMAX <= 0:
@@ -260,6 +575,29 @@ def C_ii_TopHat_MAIN_lowR(
 
 @jit(nopython=True)
 def find_id_change(x_array,x_max):
+    """
+    Find index where x_array first exceeds x_max.
+    
+    Binary-like search to determine transition point between low-k
+    and high-k integration regimes.
+    
+    Parameters
+    ----------
+    x_array : array_like
+        Sorted array to search
+    x_max : float
+        Threshold value
+        
+    Returns
+    -------
+    int
+        Index where x_array[ind] >= x_max, or len(x_array)-1 if never
+        
+    Notes
+    -----
+    Used to split k-space into regions where different integration
+    methods are optimal.
+    """
     ind = 0
     len_arr_mn1 = len(x_array) - 1
     while (x_array[ind] < x_max) & (ind < len_arr_mn1):
@@ -268,6 +606,36 @@ def find_id_change(x_array,x_max):
 
 
 def C_ij_apply_async(i,j,Cij_out,R,k,Pk,Coeffs,OmaxSmallK, n):
+    """
+    Compute single covariance matrix element (helper for parallelization).
+    
+    Computes C_ij for a specific pair of radii. Can be used with
+    multiprocessing to parallelize covariance matrix computation.
+    
+    Parameters
+    ----------
+    i, j : int
+        Indices of radii pair
+    Cij_out : ndarray
+        Output covariance matrix (modified in place)
+    R : array_like
+        Array of filter radii
+    k : array_like
+        Wavenumber array
+    Pk : array_like
+        Power spectrum
+    Coeffs : ndarray
+        Spline coefficients
+    OmaxSmallK : int
+        Small-k expansion order
+    n : float
+        Spectral index
+        
+    Notes
+    -----
+    Updates Cij_out[i,j] and Cij_out[j,i] with computed covariance.
+    Symmetric matrix structure is exploited.
+    """
     IDchange = find_id_change(k,(R[i] * R[j]) ** -0.5)
     Cij_out[i,j] = C_ij_TopHat_MAIN_lowR(Pk, k, R[i], R[j], IDchange, OmaxSmallK, n)
     Cij_out[i,j] += C_ij_TopHat_MAIN(Coeffs[IDchange:,:], k[IDchange:], R[i],R[j])
@@ -276,6 +644,36 @@ def C_ij_apply_async(i,j,Cij_out,R,k,Pk,Coeffs,OmaxSmallK, n):
 
 
 def C_ij_TopHat(Pk, k, R, n=0.96, OmaxSmallK=-1):
+    """
+    Compute covariance matrix for top-hat filtered density field.
+    
+    Calculates C_ij = ∫ Pk(k) W(k*R_i) W(k*R_j) k² dk / (2π²)
+    where W is the top-hat window function. This covariance is used in
+    excursion set theory for correlated random walks.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum values
+    k : array_like
+        Wavenumber array
+    R : array_like
+        Array of filter radii
+    n : float, optional
+        Power spectrum index for small-k approximation (default 0.96)
+    OmaxSmallK : int, optional
+        Maximum order for small-k Taylor expansion (default -1, no expansion)
+        
+    Returns
+    -------
+    Cij_out : ndarray
+        Covariance matrix (len(R), len(R))
+        
+    Notes
+    -----
+    Uses cubic spline interpolation of the power spectrum and analytical
+    integration of oscillatory integrals for efficiency and accuracy.
+    """
 
     Coeffs = cubic_spline_coeffs(k,Pk)
     explicit_from_implicit_coeffs(Coeffs,k)
@@ -302,6 +700,35 @@ def C_ij_TopHat(Pk, k, R, n=0.96, OmaxSmallK=-1):
 
 def sigma2_TopHat(
         Pk, k, R, n=0.96,OmaxSmallK=-1):
+    """
+    Compute variance of top-hat filtered density field.
+    
+    Calculates σ²(R) = ∫ Pk(k) W²(k*R) k² dk / (2π²)
+    This is the variance of the density contrast smoothed on scale R.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum P(k)
+    k : array_like
+        Wavenumber array
+    R : array_like
+        Filter radius array
+    n : float, optional
+        Spectral index for small-k (default 0.96)
+    OmaxSmallK : int, optional
+        Taylor expansion order for small-k (default -1)
+        
+    Returns
+    -------
+    OUT : ndarray
+        Variance σ²(R) at each radius
+        
+    Notes
+    -----
+    This is equivalent to the diagonal of C_ij_TopHat but computed
+    more efficiently. Central quantity in excursion set theory.
+    """
 
     Coeffs = cubic_spline_coeffs(k,Pk)
     explicit_from_implicit_coeffs(Coeffs,k)
@@ -316,6 +743,36 @@ def sigma2_TopHat(
 
 def sigma2_2_TopHat_numdiff(
         Pk, k, R, n=0.96,OmaxSmallK=-1,dRperc=5e-3):
+    """
+    Compute second moment of variance using numerical differentiation.
+    
+    Approximates d²σ²/dR² using finite differences. This quantity appears
+    in higher-order excursion set calculations.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum
+    k : array_like
+        Wavenumber array
+    R : array_like
+        Filter radii
+    n : float, optional
+        Spectral index (default 0.96)
+    OmaxSmallK : int, optional
+        Small-k expansion order (default -1)
+    dRperc : float, optional
+        Relative step size for differentiation (default 5e-3 = 0.5%)
+        
+    Returns
+    -------
+    OUT : ndarray
+        Second derivative d²σ²/dR² at each radius
+        
+    Notes
+    -----
+    Uses 3-point stencil for second derivative. Accuracy depends on dRperc.
+    """
 
     Coeffs = cubic_spline_coeffs(k,Pk)
     explicit_from_implicit_coeffs(Coeffs,k)
@@ -342,6 +799,43 @@ def sigma2_2_TopHat_numdiff(
 
 def sigma2_d2_2_TopHat_numdiff(
         Pk, k, R, accuracy=1, n=0.96,OmaxSmallK=-1,dRperc=5e-3):
+    """
+    High-accuracy computation of fourth moment of variance.
+    
+    Computes d⁴σ²/dR⁴ using high-order finite difference stencils.
+    Used in advanced excursion set formalism with barrier corrections.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum
+    k : array_like
+        Wavenumber array
+    R : array_like
+        Filter radii
+    accuracy : int, optional
+        Accuracy order: 1-4 (default 1)
+        Higher values use more points for better accuracy
+    n : float, optional
+        Spectral index (default 0.96)
+    OmaxSmallK : int, optional
+        Small-k expansion order (default -1)
+    dRperc : float, optional
+        Relative step size (default 5e-3)
+        
+    Returns
+    -------
+    OUT : ndarray
+        Fourth derivative at each radius
+        
+    Notes
+    -----
+    Accuracy levels:
+    - 1: 3-point stencil
+    - 2: 5-point stencil  
+    - 3: 7-point stencil
+    - 4: 9-point stencil
+    """
 
     Coeffs = cubic_spline_coeffs(k,Pk)
     explicit_from_implicit_coeffs(Coeffs,k)
@@ -383,6 +877,32 @@ def sigma2_d2_2_TopHat_numdiff(
 
 
 def dSdR_TopHat_MAIN_lowR(Pk,k, R, IDchange, OMAX, n):
+    """
+    Compute variance derivative for low-k regime.
+    
+    Integrates dσ²/dR using window function derivative for non-oscillatory
+    part of k-space.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum
+    k : array_like
+        Wavenumber array
+    R : float
+        Filter radius
+    IDchange : int
+        Transition index
+    OMAX : int
+        Small-k expansion order
+    n : float
+        Spectral index
+        
+    Returns
+    -------
+    float
+        Low-k contribution to dσ²/dR
+    """
     
 
     Pk_k2_w1w2 = Pk * k * k * dr_square_top_hat_rk_HR(R,k)
@@ -411,6 +931,35 @@ def dSdR_TopHat_MAIN_lowR(Pk,k, R, IDchange, OMAX, n):
 
 
 def dSdR_TopHat_MAIN(coeffs, x, a, IDchange):
+    """
+    Compute variance derivative for high-k regime using analytical methods.
+    
+    Integrates dσ²/dR analytically using spline coefficients and
+    trigonometric integrals. Includes both direct integral and the
+    term from differentiating 1/R⁶ factor.
+    
+    Parameters
+    ----------
+    coeffs : ndarray
+        Cubic spline coefficients for P(k)
+    x : array_like
+        Wavenumber array
+    a : float
+        Inverse radius 1/R
+    IDchange : int
+        Starting index for high-k regime
+        
+    Returns
+    -------
+    float
+        High-k contribution to dσ²/dR
+        
+    Notes
+    -----
+    Derivative includes two terms:
+    1. Derivative of window function (direct)
+    2. Derivative of 1/R⁶ normalization factor
+    """
 
     a2 = a*a
     a3 = a*a*a
@@ -446,6 +995,35 @@ def dSdR_TopHat_MAIN(coeffs, x, a, IDchange):
 
 
 def dSdR_TopHat(Pk, k, R, n=0.96, OmaxSmallK=-1):
+    """
+    Compute derivative of variance with respect to radius.
+    
+    Calculates dσ²/dR for top-hat filtered field. This derivative is used
+    in excursion set calculations to relate crossing statistics to mass.
+    
+    Parameters
+    ----------
+    Pk : array_like
+        Power spectrum
+    k : array_like
+        Wavenumber array
+    R : array_like
+        Filter radius array
+    n : float, optional
+        Spectral index (default 0.96)
+    OmaxSmallK : int, optional
+        Small-k expansion order (default -1)
+        
+    Returns
+    -------
+    OUT : ndarray
+        Derivative dσ²/dR at each radius
+        
+    Notes
+    -----
+    The derivative involves the derivative of the window function,
+    which introduces additional oscillatory integrals.
+    """
 
     len_R = R.shape[0]
 
