@@ -103,8 +103,6 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         key = (round(omega_m, 4), round(w, 3))
         
         if key not in power_spectrum_cache:  
-            if verbose:
-                print("Computing power spectrum with CAMB...")
             
             pars = camb.CAMBparams()
             pars.set_cosmology(
@@ -132,21 +130,13 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         # Use reference grid:  100 → 1 Mpc/h (logarithmic)
         R_L = np.logspace(2, 0, 101)
         
-        if verbose:
-            print(f"Using R range: {R_L.max():.1f} → {R_L. min():.1f} Mpc/h (Lagrangian)")
-        
         # ===== COMPUTE SIGMA_CHI =====
         if sigma_z > 0:
             sigma_chi = compute_sigma_chi(z_mean, sigma_z, cosmo)
         else:
             sigma_chi = 0.0
         
-        if verbose:
-            print(f"\nPhoto-z parameter: sigma_chi = {sigma_chi:.2f} Mpc/h")
-        
         # ===== VARIANCE AND W PARAMETER =====
-        if verbose:
-            print("\nComputing variances and W parameter...")
         
         s_eff, dS_eff_dR, W_eff = compute_W_reference_method(
             Pk_interp, kh, R_L, sigma_chi, dRperc=5e-3, verbose=verbose
@@ -154,8 +144,6 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         
         if sigma_z > 0:
             # Also compute isotropic for comparison
-            if verbose:
-                print("\nComputing isotropic case for comparison...")
             s_iso, dS_iso_dR, W_iso = compute_W_reference_method(
                 Pk_interp, kh, R_L, sigma_chi=0.0, dRperc=5e-3, verbose=verbose
             )
@@ -167,41 +155,24 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         beta = b1 * abs(delta_v_lin) + b2
 
         if sigma_z > 0:
-            B = alpha * (1.0 + (beta / np.sqrt(s_eff))**gamma)
-            dB_dS = -0.5 * alpha * beta**gamma * gamma * s_eff**(-gamma/2.0 - 1.0)
+            B = alpha * (1.0 + (beta / s_eff)**gamma)
+            dB_dS = - alpha * beta**gamma * gamma * s_eff**(-gamma - 1.0)
             s = s_eff
             dsdR = dS_eff_dR
             W = W_eff
         else:
-            B = alpha * (1.0 + (beta / np.sqrt(s_iso))**gamma)
-            dB_dS = -0.5 * alpha * beta**gamma * gamma * s_iso**(-gamma/2.0 - 1.0)
+            B = alpha * (1.0 + (beta / s_iso)**gamma)
+            dB_dS = - alpha * beta**gamma * gamma * s_iso**(-gamma - 1.0)
             s = s_iso
             dsdR = dS_iso_dR
             W = W_iso
-        
-        # ===== DIAGNOSTICS =====
-        if verbose: 
-            print(f"\n{'='*70}")
-            print("DIAGNOSTICS")
-            print(f"{'='*70}")
-            print(f"Variance s:           min={np.min(s):.6e}, max={np.max(s):.6e}")
-            print(f"W parameter:         min={np.min(W):.6e}, max={np.max(W):.6e}")
-            print(f"s*W:                  min={np.min(s*W):.6e}, max={np.max(s*W):.6e}")
-            print(f"Barrier B:           min={np.min(B):.6e}, max={np.max(B):.6e}")
-            print(f"Barrier derivative:   min={np.min(dB_dS):.6e}, max={np.max(dB_dS):.6e}")
         
         # Check moving barrier validity
         LDD = s * W - 0.25
         n_valid = np.sum(LDD > 0)
         
-        if verbose: 
-            print(f"\nMoving Barrier Validity (LDD = s*W - 1/4):")
-            print(f"  LDD range: [{np.min(LDD):.6e}, {np.max(LDD):.6e}]")
-            print(f"  Valid radii (LDD > 0): {n_valid}/{len(LDD)}")
-        
         if n_valid < len(LDD) and verbose:
             first_invalid = np.where(LDD <= 0)[0][0]
-            print(f"  ⚠️  First invalid at R_L = {R_L[first_invalid]:.2f} Mpc/h")
         
         # ===== MULTIPLICITY FUNCTION =====
         valid_mask = LDD > 0
@@ -214,12 +185,8 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
             ) * np.abs(dsdR[valid_mask])
             f_appr_R[~valid_mask] = np.nan
             
-            if verbose:
-                print(f"\n✓ VSF computed for {np.sum(valid_mask)}/{len(s)} valid radii")
         else:
             f_appr_R[: ] = np.nan
-            if verbose:
-                print(f"\n❌ No valid radii for moving barrier approximation!")
         
         # ===== LAGRANGIAN VSF =====
         VSF_L = 3.0 / (4.0 * np.pi * R_L**3) * f_appr_R
@@ -235,11 +202,6 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         
         R_E = R_L * expansion_factor
         VSF_E = VSF_L / expansion_factor
-        
-        if verbose:
-            print(f"\n{'='*70}")
-            print("COMPUTATION COMPLETE")
-            print(f"{'='*70}\n")
         
         return R_E, VSF_E, s
         

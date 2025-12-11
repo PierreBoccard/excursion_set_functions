@@ -133,9 +133,6 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
     dS_dR = np.zeros(N)
     W = np.zeros(N)
     
-    if verbose:
-        print(f"Computing S, dS/dR, and W for {N} radii using reference method...")
-    
     for i, R in enumerate(R_array):
         # Grid of perturbations:   [R(1-ε), R, R(1+ε)]
         R_minus = R * (1.0 - dRperc)
@@ -161,8 +158,5 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
         
         # W parameter
         W[i] = sigma2_2 / (dS_dR[i]**2)
-        
-        if verbose and ((i+1) % 20 == 0 or i == N-1):
-            print(f"  Progress: {i+1}/{N} radii computed")
     
     return S, dS_dR, W
