@@ -8,8 +8,11 @@ from .cosmology import compute_sigma_chi
 from .window_functions import tophat_window_fourier, G_function
 from .variance import (
     compute_effective_variance_photoz,
+    compute_dS_dR_photoz,
+    compute_d2Xi_dR1dR2_photoz,
     compute_cross_covariance_photoz,
-    compute_W_reference_method
+    compute_W_reference_method,
+    tophat_window_derivative
 )
 from .barriers import (
     compute_barrier_standard,
@@ -36,8 +39,11 @@ __all__ = [
     
     # Variance
     "compute_effective_variance_photoz",
+    "compute_dS_dR_photoz",
+    "compute_d2Xi_dR1dR2_photoz",
     "compute_cross_covariance_photoz",
     "compute_W_reference_method",
+    "tophat_window_derivative",
     
     # Barriers
     "compute_barrier_standard",

@@ -19,7 +19,7 @@ from .variance import compute_W_reference_method
 
 
 def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin, 
-                                       omega_m, w, bias, R_euler_desired, 
+                                       omega_m, w, bias,
                                        redshift_min, redshift_max, sigma_z,
                                        f_S_MB_approx_func,
                                        delta_NL_func=None,
@@ -39,7 +39,7 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
     -----------
     a1, a2, b1, b2, gamma :   float
         Barrier function parameters
-        Barrier:  B(S) = α(1 + (β/√S)^γ)
+        Barrier:  B(S) = α(1 + (β/S)^γ)
         where α = a1*|δ_v| + a2, β = b1*|δ_v| + b2
     delta_v_lin : float
         Linear void density contrast (typically negative, e.g., -0.8)
@@ -47,8 +47,6 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
         Cosmological parameters (matter density, dark energy EOS)
     bias : float
         Void bias parameter for Eulerian transformation
-    R_euler_desired : array
-        Desired Eulerian radii (NOT USED - function creates its own grid)
     redshift_min, redshift_max : float
         Redshift range for power spectrum averaging
     sigma_z : float
@@ -86,7 +84,7 @@ def compute_vsf_eulerian_with_photoz(a1, a2, b1, b2, gamma, delta_v_lin,
     >>> R_E, VSF_E, s = compute_vsf_eulerian_with_photoz(
     ...     a1=0.517, a2=-0.089, b1=0.098, b2=0.103, gamma=1,
     ...     delta_v_lin=-0.8, omega_m=0.3, w=-1. 0, bias=2,
-    ...     R_euler_desired=None, redshift_min=1. 0, redshift_max=1.2,
+    ...     redshift_min=1. 0, redshift_max=1.2,
     ...     sigma_z=0.01, f_S_MB_approx_func=f_S_MB_approx
     ... )
     """

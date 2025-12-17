@@ -9,6 +9,37 @@ import numpy as np
 from . window_functions import tophat_window_fourier, G_function
 
 
+def tophat_window_derivative(x):
+    """
+    Derivative of Fourier top-hat window: dW_T/dx
+    
+    dW_T/dx = 3[sin(x)/x² - 3(sin(x) - x*cos(x))/x⁴]
+    
+    Parameters:
+    -----------
+    x : float or array
+        Argument k*R
+        
+    Returns:
+    --------
+    dW_dx : float or array
+        Derivative value
+    """
+    x = np.asarray(x)
+    result = np.zeros_like(x, dtype=float)
+    mask = x != 0
+    
+    x_nonzero = x[mask]
+    sin_x = np.sin(x_nonzero)
+    cos_x = np.cos(x_nonzero)
+    
+    result[mask] = 3.0 * (sin_x / x_nonzero**2 - 
+                          3.0 * (sin_x - x_nonzero * cos_x) / x_nonzero**4)
+    result[~mask] = 0.0  # limit as x->0
+    
+    return result
+
+
 def compute_effective_variance_photoz(Pk_interp, kh, R, sigma_chi):
     """
     Compute effective variance with photo-z using the analytical G-function.
@@ -47,6 +78,53 @@ def compute_effective_variance_photoz(Pk_interp, kh, R, sigma_chi):
     S_eff = np. trapz(integrand, k) / (2.0 * np. pi**2)
     
     return S_eff
+
+
+def compute_dS_dR_photoz(Pk_interp, kh, R, sigma_chi):
+    """
+    Compute true derivative dS/dR with photo-z effects.
+    
+    dS/dR = (1/π²) ∫ dk k³ P(k) W_T(kR) dW_T/d(kR) G(k σ_χ)
+    
+    This is the analytical derivative, not a finite difference approximation.
+    
+    Parameters:
+    -----------
+    Pk_interp : callable
+        Interpolated power spectrum function P(k)
+    kh : array
+        Wavenumber grid in h/Mpc
+    R : float
+        Lagrangian radius in Mpc/h
+    sigma_chi : float
+        Comoving radial uncertainty in Mpc/h
+        
+    Returns:
+    --------
+    dS_dR : float
+        True derivative of variance with respect to R
+        
+    Notes:
+    ------
+    Uses the chain rule: dS/dR = ∫ k² P(k) d[W²]/dR G dk
+                                = ∫ k² P(k) 2W dW/d(kR) * k G dk
+                                = (2/2π²) ∫ k³ P(k) W dW/dx G dk
+    """
+    k = kh
+    Pk = Pk_interp(k)
+    x = k * R
+    
+    W = tophat_window_fourier(x)
+    dW_dx = tophat_window_derivative(x)
+    G = G_function(k, sigma_chi)
+    
+    # Integrand: k³ P(k) W(kR) dW/d(kR) G(k σ_χ)
+    integrand = k**3 * Pk * W * dW_dx * G
+    
+    # Factor of 2 from derivative of W², factor of 1/(2π²) from normalization
+    dS_dR = 2.0 * np.trapz(integrand, k) / (2.0 * np.pi**2)
+    
+    return dS_dR
 
 
 def compute_cross_covariance_photoz(Pk_interp, kh, R1, R2, sigma_chi):
@@ -88,14 +166,64 @@ def compute_cross_covariance_photoz(Pk_interp, kh, R1, R2, sigma_chi):
     return Xi_12
 
 
-def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, verbose=True):
+def compute_d2Xi_dR1dR2_photoz(Pk_interp, kh, R, sigma_chi):
     """
-    Compute W parameter using the reference covariance matrix method.
+    Compute mixed second derivative ∂²Ξ/∂R₁∂R₂|_{R₁=R₂=R} analytically.
     
-    Matches the integration. py:: sigma2_2_TopHat_numdiff approach:  
-    1. Compute cross-covariances Ξ(R±ε, R±ε) for small ε
-    2. Compute mixed second derivative:  ∂²Ξ/∂R₁∂R₂|_{R₁=R₂}
-    3. Normalize by (dS/dR)² to get W = sigma2_2 / (dS/dR)²
+    This is sigma2_2, needed for the W parameter computation.
+    
+    At R₁ = R₂ = R:
+    ∂²Ξ/∂R₁∂R₂ = (1/2π²) ∫ dk k⁴ P(k) [dW/dx]² G(k σ_χ)
+    
+    where x = kR and dW/dx is the derivative of the window function.
+    
+    Parameters:
+    -----------
+    Pk_interp : callable
+        Interpolated power spectrum function P(k)
+    kh : array
+        Wavenumber grid in h/Mpc
+    R : float
+        Lagrangian radius in Mpc/h
+    sigma_chi : float
+        Comoving radial uncertainty in Mpc/h
+        
+    Returns:
+    --------
+    sigma2_2 : float
+        Mixed second derivative (variance of the derivative)
+        
+    Notes:
+    ------
+    This is derived from:
+    ∂Ξ/∂R₁ = (1/2π²) ∫ k³ P(k) W₂ dW₁/dx G dk
+    ∂²Ξ/∂R₁∂R₂ = (1/2π²) ∫ k⁴ P(k) dW₁/dx dW₂/dx G dk
+    At R₁=R₂=R: both derivatives are the same, so we get [dW/dx]²
+    """
+    k = kh
+    Pk = Pk_interp(k)
+    x = k * R
+    
+    dW_dx = tophat_window_derivative(x)
+    G = G_function(k, sigma_chi)
+    
+    # Integrand: k⁴ P(k) [dW/dx]² G(k σ_χ)
+    integrand = k**4 * Pk * dW_dx**2 * G
+    
+    sigma2_2 = np.trapz(integrand, k) / (2.0 * np.pi**2)
+    
+    return sigma2_2
+
+
+def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi):
+    """
+    Compute W parameter using analytical derivatives (not finite differences).
+    
+    Computes:
+    1. Variance S(R) = (1/2π²) ∫ k² P(k) W² G dk
+    2. First derivative dS/dR = (1/π²) ∫ k³ P(k) W dW/dx G dk
+    3. Second derivative sigma2_2 = (1/2π²) ∫ k⁴ P(k) [dW/dx]² G dk
+    4. W parameter: W = sigma2_2 / (dS/dR)²
     
     This W parameter is what enters the moving barrier formula f_S_MB_approx.
     
@@ -110,7 +238,7 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
     sigma_chi : float
         Comoving radial uncertainty
     dRperc : float, optional
-        Relative step size for finite differences (default 5e-3 = 0.5%)
+        DEPRECATED - kept for backward compatibility, not used
     verbose : bool, optional
         Print progress messages (default True)
         
@@ -119,7 +247,7 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
     S :  array
         Variance at each radius
     dS_dR : array
-        First derivative dS/dR
+        Analytical first derivative dS/dR
     W :   array
         W = sigma2_2 / (dS/dR)²
         
@@ -127,6 +255,7 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
     ------
     The W parameter encodes information about correlations in the random walk
     and is essential for the moving barrier approximation to be accurate.
+    Now uses analytical derivatives instead of finite differences for better accuracy.
     """
     N = len(R_array)
     S = np.zeros(N)
@@ -134,29 +263,19 @@ def compute_W_reference_method(Pk_interp, kh, R_array, sigma_chi, dRperc=5e-3, v
     W = np.zeros(N)
     
     for i, R in enumerate(R_array):
-        # Grid of perturbations:   [R(1-ε), R, R(1+ε)]
-        R_minus = R * (1.0 - dRperc)
-        R_plus = R * (1.0 + dRperc)
-        
-        # Compute covariance matrix elements
-        # [0]:   Ξ(R-, R-)  [-- case]
-        # [1]:  Ξ(R+, R-)  [+- case]
-        # [2]:   Ξ(R+, R+)  [++ case]
-        Xi_mm = compute_effective_variance_photoz(Pk_interp, kh, R_minus, sigma_chi)
-        Xi_pm = compute_cross_covariance_photoz(Pk_interp, kh, R_plus, R_minus, sigma_chi)
-        Xi_pp = compute_effective_variance_photoz(Pk_interp, kh, R_plus, sigma_chi)
-        
-        # Main variance (at R)
+        # Compute variance analytically
         S[i] = compute_effective_variance_photoz(Pk_interp, kh, R, sigma_chi)
         
-        # Compute sigma2_2 (mixed second derivative of covariance)
-        # This is:   ∂²Ξ(R1,R2)/∂R1∂R2 |_{R1=R2=R}
-        sigma2_2 = 0.25 * (Xi_pp - 2.0 * Xi_pm + Xi_mm) / (R * dRperc)**2
+        # Compute first derivative analytically (TRUE derivative, not finite difference)
+        dS_dR[i] = compute_dS_dR_photoz(Pk_interp, kh, R, sigma_chi)
         
-        # Compute dS/dR using central difference
-        dS_dR[i] = (Xi_pp - Xi_mm) / (2.0 * R * dRperc)
+        # Compute second derivative (sigma2_2) analytically
+        sigma2_2 = compute_d2Xi_dR1dR2_photoz(Pk_interp, kh, R, sigma_chi)
         
         # W parameter
-        W[i] = sigma2_2 / (dS_dR[i]**2)
+        if dS_dR[i] != 0:
+            W[i] = sigma2_2 / (dS_dR[i]**2)
+        else:
+            W[i] = 0.0
     
     return S, dS_dR, W
